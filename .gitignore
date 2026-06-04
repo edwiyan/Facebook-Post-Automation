@@ -1,4 +1,8 @@
 _test/
 post.jpg
 quote.json
+day.txt
+quote.txt
+caption.txt
+*_critique.txt
 __pycache__/

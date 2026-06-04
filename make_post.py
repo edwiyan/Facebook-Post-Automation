@@ -132,28 +132,111 @@ def post_make(caption, image_url):
 
 
 def load_input():
-    qp = os.path.join(ROOT, "quote.json")
-    if os.path.exists(qp):
-        d = json.load(open(qp, encoding="utf-8"))
-        return d.get("day"), d["quote"], d["caption"]
-    return os.environ.get("NV_DAY"), os.environ.get("NV_QUOTE", ""), os.environ.get("NV_CAPTION", "")
+    """Read day/quote/caption from plain text files (robust for LLM-written
+    multi-line captions), falling back to env vars, then quote.json."""
+    def rd(fn):
+        p = os.path.join(ROOT, fn)
+        return open(p, encoding="utf-8").read().strip() if os.path.exists(p) else ""
+    day = rd("day.txt") or os.environ.get("NV_DAY")
+    quote = rd("quote.txt") or os.environ.get("NV_QUOTE", "")
+    caption = rd("caption.txt") or os.environ.get("NV_CAPTION", "")
+    if not quote:
+        qp = os.path.join(ROOT, "quote.json")
+        if os.path.exists(qp):
+            d = json.load(open(qp, encoding="utf-8"))
+            day = day or d.get("day"); quote = d.get("quote", ""); caption = d.get("caption", "")
+    return day, quote, caption
 
 
-if __name__ == "__main__":
+OUT = os.path.join(ROOT, "post.jpg")
+
+# Minimum acceptable rendered font size (px) per day. If the auto-fit shrinks
+# below this, the quote is too long for that template's zone -> QA fail.
+# Floors set ~30% below each design's natural sample size, so good quotes pass
+# and overly-long ones get caught and retried.
+QA_MIN_FONT = {"Monday": 36, "Tuesday": 70, "Wednesday": 48, "Thursday": 40,
+               "Friday": 26, "Saturday": 36, "Sunday": 44}
+
+
+def qa(day, quote):
+    """Deterministic, offline design check. Returns a list of issue strings
+    (empty list == pass). No API key needed."""
+    cfg = CONFIG[day]
+    x, y, w, h = cfg["zone"]
+    draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
+    font, lines, lh = fit(draw, quote, cfg["font"], cfg["weight"], w, h, cfg.get("upper", False))
+    issues = []
+    floor = QA_MIN_FONT.get(day, 30)
+    if font.size < floor:
+        issues.append(f"quote too long for {day}: fits only at {font.size}px (need >={floor}px) - shorten it")
+    if len(lines) > 4:
+        issues.append(f"too many lines ({len(lines)}) - keep it tighter")
+    widest = max((draw.textlength(l, font=font) for l in lines), default=0)
+    if widest > w or lh * len(lines) > h:
+        issues.append("text overflows the quote zone")
+    return issues
+
+
+def cmd_qa():
+    day, quote, caption = load_input()
+    day = day or today_manila()
+    if day not in CONFIG:
+        sys.exit(f"Unknown day: {day}")
+    if not quote.strip():
+        sys.exit("No quote provided.")
+    issues = qa(day, quote)
+    if issues:
+        print(f"QA FAIL ({day}) - {quote!r}")
+        for i in issues:
+            print("  -", i)
+        sys.exit(1)
+    print(f"QA PASS ({day}) - {quote!r} fits cleanly")
+    sys.exit(0)
+
+
+def cmd_render():
     day, quote, caption = load_input()
     day = day or today_manila()
     if day not in CONFIG:
         sys.exit(f"Unknown day: {day}")
     if not quote.strip():
         sys.exit("No quote provided (quote.json or NV_QUOTE).")
+    render(day, quote, OUT)
+    print(f"Rendered {day}: {quote!r} -> {OUT}")
+
+
+def cmd_publish():
+    day, quote, caption = load_input()
+    if not os.path.exists(OUT):
+        sys.exit(f"No rendered image at {OUT}. Run 'render' first.")
     if not caption.strip():
         caption = f'"{quote}"\n\n#NaturalVibes'
-
-    out = os.path.join(ROOT, "post.jpg")
-    render(day, quote, out)
-    print(f"Rendered {day}: {quote!r} -> {out}")
-    url = upload_tmpfiles(out)
+    url = upload_tmpfiles(OUT)
     print(f"Uploaded: {url}")
-    resp = post_make(caption, url)
+    post_make(caption, url)
     print("Posted to Make.com -> Facebook")
     print("Caption:", caption[:120].replace("\n", " "))
+
+
+if __name__ == "__main__":
+    mode = sys.argv[1].lower() if len(sys.argv) > 1 else "all"
+    if mode == "render":
+        cmd_render()
+    elif mode == "qa":
+        cmd_qa()
+    elif mode == "publish":
+        cmd_publish()
+    elif mode == "all":          # local/manual: render + qa + publish in one go
+        cmd_render()
+        _day, _quote, _ = load_input()
+        _day = _day or today_manila()
+        _issues = qa(_day, _quote)
+        if _issues:
+            print(f"QA FAIL ({_day}) - not publishing:")
+            for _i in _issues:
+                print("  -", _i)
+            sys.exit(1)
+        print(f"QA PASS ({_day})")
+        cmd_publish()
+    else:
+        sys.exit(f"Usage: make_post.py [render|qa|publish]  (got {mode!r})")
