@@ -86,7 +86,6 @@ def fit(draw, text, name, weight, zone_w, zone_h, upper=False):
 
 
 def render(day, quote, out_path):
-    import numpy as np
     cfg = CONFIG[day]
     base = Image.open(os.path.join(TPL, f"{day}.png")).convert("RGBA")
     scratch = ImageDraw.Draw(base)
@@ -102,12 +101,11 @@ def render(day, quote, out_path):
         lw = scratch.textlength(ln, font=font)
         lx = x if cfg["align"] == "left" else (x + w - lw if cfg["align"] == "right" else x + (w - lw) / 2)
         if cfg.get("shadow"):
-            sdraw.text((lx, yy), ln, font=font, fill=cfg["shadow"])
+            sdraw.text((lx + 3, yy + 3), ln, font=font, fill=cfg["shadow"])
         tdraw.text((lx, yy), ln, font=font, fill=cfg["color"])
         yy += lh
     if cfg.get("shadow"):
         shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(6))
-        shadow_layer = Image.fromarray(np.roll(np.array(shadow_layer), (3, 3), axis=(0, 1)))
         base = Image.alpha_composite(base, shadow_layer)
     base = Image.alpha_composite(base, txt_layer)
     base.convert("RGB").save(out_path, "JPEG", quality=88, optimize=True)
