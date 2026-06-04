@@ -40,8 +40,10 @@ CONFIG = {
                   "zone": (92, 184, 894, 224), "align": "center", "shadow": (255, 255, 255, 110)},
     "Thursday":  {"font": "Cormorant-Italic.ttf", "weight": 600, "color": (233, 198, 112),
                   "zone": (191, 777, 697, 83), "align": "center", "shadow": (0, 0, 0, 150)},
-    "Friday":    {"font": "Lato-Light.ttf", "weight": None, "color": (245, 206, 92),
-                  "zone": (330, 1078, 432, 56), "align": "center", "shadow": (0, 0, 0, 140)},
+    "Friday":    {"font": "Anton-Regular.ttf", "weight": None, "color": (250, 224, 150),
+                  "zone": (90, 420, 900, 500), "align": "center", "upper": True,
+                  "sentence_lines": True, "leading": 0.9,
+                  "shadow": (0, 0, 0, 150), "stroke": (9, (26, 6, 6))},
     "Saturday":  {"font": "Lato-Regular.ttf", "weight": None, "color": (251, 243, 220),
                   "zone": (150, 252, 780, 132), "align": "center", "shadow": (35, 18, 5, 175)},
     "Sunday":    {"font": "Cormorant.ttf", "weight": 600, "color": (36, 72, 52),
@@ -64,39 +66,56 @@ def load_font(name, size, weight):
     return f
 
 
-def wrap(draw, text, font, max_w):
-    words, lines, cur = text.split(), [], []
-    for w in words:
-        test = " ".join(cur + [w])
-        if draw.textlength(test, font=font) > max_w and cur:
-            lines.append(" ".join(cur)); cur = [w]
-        else:
-            cur.append(w)
-    if cur:
-        lines.append(" ".join(cur))
+def wrap(draw, text, font, max_w, sentence_lines=False):
+    import re
+    # Each chunk starts as its own line; sentence_lines splits on . ! ? so every
+    # sentence gets its own line. Long chunks still word-wrap to fit max_w.
+    if sentence_lines:
+        chunks = [c.strip() for c in re.findall(r"[^.!?]+[.!?]*", text) if c.strip()]
+    else:
+        chunks = [text]
+    lines = []
+    for chunk in chunks:
+        cur = []
+        for w in chunk.split():
+            test = " ".join(cur + [w])
+            if draw.textlength(test, font=font) > max_w and cur:
+                lines.append(" ".join(cur)); cur = [w]
+            else:
+                cur.append(w)
+        if cur:
+            lines.append(" ".join(cur))
     return lines
 
 
-def fit(draw, text, name, weight, zone_w, zone_h, upper=False):
+def fit(draw, text, name, weight, zone_w, zone_h, upper=False, sentence_lines=False, leading=1.16):
     if upper:
         text = text.upper()
     for size in range(220, 9, -2):
         font = load_font(name, size, weight)
-        lines = wrap(draw, text, font, zone_w)
+        lines = wrap(draw, text, font, zone_w, sentence_lines)
         asc, desc = font.getmetrics()
-        lh = int((asc + desc) * 1.16)
+        lh = int((asc + desc) * leading)
         if lh * len(lines) <= zone_h and max((draw.textlength(l, font=font) for l in lines), default=0) <= zone_w:
             return font, lines, lh
     font = load_font(name, 10, weight)
-    return font, wrap(draw, text, font, zone_w), 14
+    return font, wrap(draw, text, font, zone_w, sentence_lines), 14
 
 
 def render(day, quote, out_path):
     cfg = CONFIG[day]
     base = Image.open(os.path.join(TPL, f"{day}.png")).convert("RGBA")
-    scratch = ImageDraw.Draw(base)
     x, y, w, h = cfg["zone"]
-    font, lines, lh = fit(scratch, quote, cfg["font"], cfg["weight"], w, h, cfg.get("upper", False))
+    # optional scrim panel behind the text (legibility over busy backgrounds)
+    if cfg.get("scrim"):
+        pad = cfg.get("scrim_pad", 30)
+        ov = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        ImageDraw.Draw(ov).rounded_rectangle(
+            [x - pad, y - pad, x + w + pad, y + h + pad],
+            radius=cfg.get("scrim_radius", 40), fill=cfg["scrim"])
+        base = Image.alpha_composite(base, ov)
+    scratch = ImageDraw.Draw(base)
+    font, lines, lh = fit(scratch, quote, cfg["font"], cfg["weight"], w, h, cfg.get("upper", False), cfg.get("sentence_lines", False), cfg.get("leading", 1.16))
     yy = y + (h - lh * len(lines)) // 2
 
     shadow_layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
@@ -108,13 +127,18 @@ def render(day, quote, out_path):
         lx = x if cfg["align"] == "left" else (x + w - lw if cfg["align"] == "right" else x + (w - lw) / 2)
         if cfg.get("shadow"):
             sdraw.text((lx + 3, yy + 3), ln, font=font, fill=cfg["shadow"])
-        tdraw.text((lx, yy), ln, font=font, fill=cfg["color"])
+        stroke = cfg.get("stroke")
+        if stroke:
+            tdraw.text((lx, yy), ln, font=font, fill=cfg["color"],
+                       stroke_width=stroke[0], stroke_fill=stroke[1])
+        else:
+            tdraw.text((lx, yy), ln, font=font, fill=cfg["color"])
         yy += lh
     if cfg.get("shadow"):
         shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(6))
         base = Image.alpha_composite(base, shadow_layer)
     base = Image.alpha_composite(base, txt_layer)
-    base.convert("RGB").save(out_path, "JPEG", quality=88, optimize=True)
+    base.convert("RGB").save(out_path, "JPEG", quality=95, subsampling=0, optimize=True)
 
 
 def post_facebook_photo(caption, image_path, token):
@@ -178,7 +202,7 @@ def qa(day, quote):
     cfg = CONFIG[day]
     x, y, w, h = cfg["zone"]
     draw = ImageDraw.Draw(Image.new("RGB", (1080, 1350)))
-    font, lines, lh = fit(draw, quote, cfg["font"], cfg["weight"], w, h, cfg.get("upper", False))
+    font, lines, lh = fit(draw, quote, cfg["font"], cfg["weight"], w, h, cfg.get("upper", False), cfg.get("sentence_lines", False), cfg.get("leading", 1.16))
     issues = []
     floor = QA_MIN_FONT.get(day, 30)
     if font.size < floor:
