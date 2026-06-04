@@ -4,17 +4,22 @@ Runs inside the CCR routine sandbox after the repo is downloaded/unzipped.
 
 Flow:
   1. Determine today's day (Asia/Manila, UTC+8) unless overridden.
-  2. Read the generated quote + caption (from quote.json, else env NV_QUOTE / NV_CAPTION).
+  2. Read the generated quote + caption (day.txt / quote.txt / caption.txt, else env).
   3. Overlay the quote into that day's template (./templates/<Day>.png) with PIL.
-  4. Upload the rendered image to tmpfiles.org -> public URL.
-  5. POST {caption, image_url} to the Make.com webhook -> Facebook Page.
+  4. (publish) Upload the rendered image DIRECTLY to the Facebook Page Graph API
+     (/photos, multipart) using FACEBOOK_PAGE_TOKEN from the environment.
+     No tmpfiles.org, no Make.com — one outbound host: graph.facebook.com.
 
 Repo layout expected:
   ./templates/<Day>.png   (7 clean 1080x1350 PNGs)
   ./fonts/*.ttf           (7 Google Fonts)
   ./make_post.py          (this file)
+
+Environment (set in the cloud environment's variables):
+  FACEBOOK_PAGE_TOKEN  (required for publish) — Page access token
+  FACEBOOK_PAGE_ID     (optional) — defaults below
 """
-import os, sys, json, urllib.request
+import os, sys, json, urllib.request, urllib.error
 from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
@@ -22,7 +27,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 TPL = os.path.join(ROOT, "templates")
 FONTS = os.path.join(ROOT, "fonts")
 
-MAKE_WEBHOOK = "https://hook.eu1.make.com/n6w8vv6t5i22g6hm1n47dnok6kzee1n6"
+API_VERSION = "v25.0"
+PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID", "1133534073170877")
 
 # Per-day design config. Zones in the 1080x1350 pixel space.
 CONFIG = {
@@ -111,24 +117,32 @@ def render(day, quote, out_path):
     base.convert("RGB").save(out_path, "JPEG", quality=88, optimize=True)
 
 
-def upload_tmpfiles(path):
-    with open(path, "rb") as f:
-        img = f.read()
+def post_facebook_photo(caption, image_path, token):
+    """Upload the rendered image straight to the Page's /photos endpoint as a
+    multipart POST. Returns the parsed JSON response (raises on HTTP error with
+    the Graph API error body)."""
+    url = f"https://graph.facebook.com/{API_VERSION}/{PAGE_ID}/photos"
     b = "nv_boundary"
-    body = (f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="post.jpg"\r\n'
-            f'Content-Type: image/jpeg\r\n\r\n').encode() + img + f'\r\n--{b}--\r\n'.encode()
-    req = urllib.request.Request("https://tmpfiles.org/api/v1/upload", data=body,
-                                 headers={"Content-Type": f"multipart/form-data; boundary={b}"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        url = json.loads(r.read())["data"]["url"]
-    return url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+    with open(image_path, "rb") as f:
+        img = f.read()
 
+    def field(name, value):
+        return (f'--{b}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
+                f'{value}\r\n').encode("utf-8")
 
-def post_make(caption, image_url):
-    data = json.dumps({"caption": caption, "image_url": image_url}).encode()
-    req = urllib.request.Request(MAKE_WEBHOOK, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read().decode("utf-8", "ignore")
+    body = field("access_token", token) + field("caption", caption)
+    body += (f'--{b}\r\nContent-Disposition: form-data; name="source"; '
+             f'filename="post.jpg"\r\nContent-Type: image/jpeg\r\n\r\n').encode("utf-8")
+    body += img + f"\r\n--{b}--\r\n".encode("utf-8")
+
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={b}"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return json.loads(e.read())
 
 
 def load_input():
@@ -211,10 +225,14 @@ def cmd_publish():
         sys.exit(f"No rendered image at {OUT}. Run 'render' first.")
     if not caption.strip():
         caption = f'"{quote}"\n\n#NaturalVibes'
-    url = upload_tmpfiles(OUT)
-    print(f"Uploaded: {url}")
-    post_make(caption, url)
-    print("Posted to Make.com -> Facebook")
+    token = os.environ.get("FACEBOOK_PAGE_TOKEN", "").strip()
+    if not token:
+        sys.exit("ERROR: FACEBOOK_PAGE_TOKEN not set in environment.")
+    result = post_facebook_photo(caption, OUT, token)
+    if "error" in result:
+        print("Facebook API error:", json.dumps(result["error"], indent=2))
+        sys.exit(1)
+    print(f"Posted to Facebook. photo_id={result.get('id')} post_id={result.get('post_id')}")
     print("Caption:", caption[:120].replace("\n", " "))
 
 
