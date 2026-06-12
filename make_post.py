@@ -6,9 +6,9 @@ Flow:
   1. Determine today's day (Asia/Manila, UTC+8) unless overridden.
   2. Read the generated quote + caption (day.txt / quote.txt / caption.txt, else env).
   3. Overlay the quote into that day's template (./templates/<Day>.png) with PIL.
-  4. (publish) Upload the rendered image DIRECTLY to the Facebook Page Graph API
-     (/photos, multipart) using FACEBOOK_PAGE_TOKEN from the environment.
-     No tmpfiles.org, no Make.com — one outbound host: graph.facebook.com.
+  4. (publish) Upload post.jpg to imgbb.com → trigger Make.com webhook →
+     Make.com posts to Facebook using its own approved app (bypasses Development Mode).
+     Outbound hosts: api.imgbb.com, hook.eu1.make.com.
 
 Repo layout expected:
   ./templates/<Day>.png   (7 clean 1080x1350 PNGs)
@@ -16,10 +16,11 @@ Repo layout expected:
   ./make_post.py          (this file)
 
 Environment (set in the cloud environment's variables):
-  FACEBOOK_PAGE_TOKEN  (required for publish) — Page access token
+  IMGBB_API_KEY        (required for publish) — imgbb.com free API key
+  MAKECOM_WEBHOOK_URL  (optional) — defaults to the Natural Vibes webhook below
   FACEBOOK_PAGE_ID     (optional) — defaults below
 """
-import os, sys, json, urllib.request, urllib.error
+import os, sys, json, urllib.request, urllib.error, urllib.parse
 from datetime import datetime, timezone, timedelta
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
@@ -29,6 +30,7 @@ FONTS = os.path.join(ROOT, "fonts")
 
 API_VERSION = "v25.0"
 PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID", "1133534073170877")
+MAKECOM_WEBHOOK = os.environ.get("MAKECOM_WEBHOOK_URL", "https://hook.eu1.make.com/n6w8vv6t5i22g6hm1n47dnok6kzee1n6")
 
 # Per-day design config. Zones in the 1080x1350 pixel space.
 CONFIG = {
@@ -141,32 +143,37 @@ def render(day, quote, out_path):
     base.convert("RGB").save(out_path, "JPEG", quality=95, subsampling=0, optimize=True)
 
 
-def post_facebook_photo(caption, image_path, token):
-    """Upload the rendered image straight to the Page's /photos endpoint as a
-    multipart POST. Returns the parsed JSON response (raises on HTTP error with
-    the Graph API error body)."""
-    url = f"https://graph.facebook.com/{API_VERSION}/{PAGE_ID}/photos"
-    b = "nv_boundary"
+def upload_to_imgbb(image_path, api_key):
+    """Upload image to imgbb.com and return the public URL."""
+    import base64
     with open(image_path, "rb") as f:
-        img = f.read()
-
-    def field(name, value):
-        return (f'--{b}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
-                f'{value}\r\n').encode("utf-8")
-
-    body = field("access_token", token) + field("caption", caption)
-    body += (f'--{b}\r\nContent-Disposition: form-data; name="source"; '
-             f'filename="post.jpg"\r\nContent-Type: image/jpeg\r\n\r\n').encode("utf-8")
-    body += img + f"\r\n--{b}--\r\n".encode("utf-8")
-
+        image_b64 = base64.b64encode(f.read()).decode("utf-8")
+    body = urllib.parse.urlencode({"key": api_key, "image": image_b64}).encode("utf-8")
     req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={b}"})
+        "https://api.imgbb.com/1/upload", data=body, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read())
+            result = json.loads(r.read())
     except urllib.error.HTTPError as e:
-        return json.loads(e.read())
+        raise RuntimeError(f"imgbb upload failed: {e.read().decode()}")
+    if not result.get("success"):
+        raise RuntimeError(f"imgbb upload failed: {result}")
+    return result["data"]["url"]
+
+
+def trigger_makecom(image_url, caption, webhook_url):
+    """Send image URL + caption to Make.com webhook. Make.com posts to Facebook
+    using its own approved app, so the post appears in the public timeline."""
+    body = json.dumps({"image_url": image_url, "caption": caption}).encode("utf-8")
+    req = urllib.request.Request(
+        webhook_url, data=body, method="POST",
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Make.com webhook failed: {e.read().decode()}")
 
 
 def load_input():
@@ -249,14 +256,21 @@ def cmd_publish():
         sys.exit(f"No rendered image at {OUT}. Run 'render' first.")
     if not caption.strip():
         caption = f'"{quote}"\n\n#NaturalVibes'
-    token = os.environ.get("FACEBOOK_PAGE_TOKEN", "").strip()
-    if not token:
-        sys.exit("ERROR: FACEBOOK_PAGE_TOKEN not set in environment.")
-    result = post_facebook_photo(caption, OUT, token)
-    if "error" in result:
-        print("Facebook API error:", json.dumps(result["error"], indent=2))
-        sys.exit(1)
-    print(f"Posted to Facebook. photo_id={result.get('id')} post_id={result.get('post_id')}")
+    api_key = os.environ.get("IMGBB_API_KEY", "").strip()
+    if not api_key:
+        sys.exit("ERROR: IMGBB_API_KEY not set in environment.")
+    print("Uploading image to imgbb...")
+    try:
+        image_url = upload_to_imgbb(OUT, api_key)
+    except RuntimeError as e:
+        print(e); sys.exit(1)
+    print(f"Image hosted at: {image_url}")
+    print("Triggering Make.com webhook...")
+    try:
+        response = trigger_makecom(image_url, caption, MAKECOM_WEBHOOK)
+    except RuntimeError as e:
+        print(e); sys.exit(1)
+    print(f"Make.com response: {response}")
     print("Caption:", caption[:120].replace("\n", " "))
 
 
