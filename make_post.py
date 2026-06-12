@@ -33,23 +33,28 @@ PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID", "1133534073170877")
 MAKECOM_WEBHOOK = os.environ.get("MAKECOM_WEBHOOK_URL", "https://hook.eu1.make.com/n6w8vv6t5i22g6hm1n47dnok6kzee1n6")
 
 # Per-day design config. Zones in the 1080x1350 pixel space.
+# brand_text=True → render "Natural Vibes" at bottom (days whose template PNG lacks baked-in branding)
 CONFIG = {
     "Monday":    {"font": "PlayfairDisplay-Italic.ttf", "weight": 600, "color": (242, 188, 78),
-                  "zone": (195, 596, 689, 263), "align": "center", "shadow": (0, 0, 0, 150)},
+                  "zone": (195, 450, 689, 310), "align": "center", "shadow": (0, 0, 0, 150)},
     "Tuesday":   {"font": "Anton-Regular.ttf", "weight": None, "color": (255, 255, 255),
-                  "zone": (66, 233, 935, 448), "align": "left", "shadow": (120, 60, 10, 160), "upper": True},
-    "Wednesday": {"font": "Cormorant.ttf", "weight": 600, "color": (38, 44, 50),
-                  "zone": (92, 184, 894, 224), "align": "center", "shadow": (255, 255, 255, 110)},
+                  "zone": (66, 233, 935, 448), "align": "left", "shadow": (120, 60, 10, 160), "upper": True,
+                  "brand_text": True, "brand_color": (160, 90, 20)},
+    "Wednesday": {"font": "Cormorant.ttf", "weight": 700, "color": (38, 44, 50),
+                  "zone": (92, 100, 894, 330), "align": "center", "shadow": (255, 255, 255, 110),
+                  "brand_text": True},
     "Thursday":  {"font": "Cormorant-Italic.ttf", "weight": 600, "color": (233, 198, 112),
-                  "zone": (191, 777, 697, 83), "align": "center", "shadow": (0, 0, 0, 150)},
+                  "zone": (100, 340, 880, 550), "align": "center", "shadow": (0, 0, 0, 150)},
     "Friday":    {"font": "Anton-Regular.ttf", "weight": None, "color": (250, 224, 150),
                   "zone": (90, 420, 900, 500), "align": "center", "upper": True,
                   "sentence_lines": True, "leading": 0.9,
                   "shadow": (0, 0, 0, 150), "stroke": (9, (26, 6, 6))},
-    "Saturday":  {"font": "Lato-Regular.ttf", "weight": None, "color": (251, 243, 220),
-                  "zone": (150, 252, 780, 132), "align": "center", "shadow": (35, 18, 5, 175)},
+    "Saturday":  {"font": "Cormorant-Italic.ttf", "weight": 600, "color": (251, 243, 220),
+                  "zone": (60, 25, 960, 130), "align": "center", "shadow": (15, 10, 5, 215),
+                  "brand_text": True},
     "Sunday":    {"font": "Cormorant.ttf", "weight": 600, "color": (36, 72, 52),
-                  "zone": (135, 165, 810, 200), "align": "center", "shadow": (255, 255, 246, 120)},
+                  "zone": (135, 165, 810, 200), "align": "center", "shadow": (255, 255, 246, 120),
+                  "brand_text": True, "brand_color": (36, 72, 52)},
 }
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -140,6 +145,22 @@ def render(day, quote, out_path):
         shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(6))
         base = Image.alpha_composite(base, shadow_layer)
     base = Image.alpha_composite(base, txt_layer)
+
+    # Brand text: rendered for days whose template PNG has no baked-in "Natural Vibes"
+    if cfg.get("brand_text"):
+        b_shad = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        b_txt = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        bfont = load_font("PlayfairDisplay-Italic.ttf", 68, 600)
+        brand = "Natural Vibes"
+        bw = ImageDraw.Draw(b_txt).textlength(brand, font=bfont)
+        bx = (1080 - bw) / 2
+        by = 1240
+        ImageDraw.Draw(b_shad).text((bx + 3, by + 3), brand, font=bfont, fill=(0, 0, 0, 185))
+        b_shad = b_shad.filter(ImageFilter.GaussianBlur(6))
+        base = Image.alpha_composite(base, b_shad)
+        ImageDraw.Draw(b_txt).text((bx, by), brand, font=bfont, fill=cfg.get("brand_color", (242, 188, 78)))
+        base = Image.alpha_composite(base, b_txt)
+
     base.convert("RGB").save(out_path, "JPEG", quality=95, subsampling=0, optimize=True)
 
 
@@ -199,8 +220,8 @@ OUT = os.path.join(ROOT, "post.jpg")
 # below this, the quote is too long for that template's zone -> QA fail.
 # Floors set ~30% below each design's natural sample size, so good quotes pass
 # and overly-long ones get caught and retried.
-QA_MIN_FONT = {"Monday": 36, "Tuesday": 70, "Wednesday": 48, "Thursday": 40,
-               "Friday": 26, "Saturday": 36, "Sunday": 44}
+QA_MIN_FONT = {"Monday": 36, "Tuesday": 70, "Wednesday": 60, "Thursday": 70,
+               "Friday": 26, "Saturday": 40, "Sunday": 44}
 
 
 def qa(day, quote):
